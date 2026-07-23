@@ -1,45 +1,55 @@
-
+"""
+app.py — the Indxx ETF & Fund Filings dashboard. Runs locally on your ThinkPad.
+Start it with: streamlit run app.py
+Requires etf_data.db to already exist (run pipeline.py at least once first).
+ 
+Keep these three files together in the same folder:
+    app.py, pipeline.py, indxx_logo.png
+(The logo file powers the branded header. If it's missing the app still runs,
+it just falls back to a text title.)
+"""
+ 
 import os
 import base64
 import sqlite3
 import datetime
-
+ 
 import pandas as pd
 import streamlit as st
-
+ 
 DB_PATH = "etf_data.db"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH = os.path.join(BASE_DIR, "indxx_logo.png")
-
+ 
 # ---- Indxx brand palette (sampled from the logo) ----
 INDXX_RED = "#EE3024"
 INDXX_RED_DARK = "#C8281D"
 INDXX_GREY = "#B4B3B3"
 INK = "#2B2B2E"
-
-
+ 
+ 
 def _logo_b64():
     try:
         with open(LOGO_PATH, "rb") as f:
             return base64.b64encode(f.read()).decode()
     except Exception:
         return None
-
-
+ 
+ 
 _LOGO = _logo_b64()
-
+ 
 st.set_page_config(
     page_title="Indxx — ETF & Fund Filings",
     page_icon=LOGO_PATH if _LOGO else "📈",
     layout="wide",
 )
-
+ 
 # ---- Brand styling ----------------------------------------------------------
 st.markdown(
     f"""
     <style>
       :root {{ --indxx-red: {INDXX_RED}; --indxx-grey: {INDXX_GREY}; --ink: {INK}; }}
-
+ 
       /* Branded header banner */
       .indxx-header {{
           display: flex; align-items: center; gap: 22px;
@@ -52,28 +62,28 @@ st.markdown(
       .indxx-title {{ font-size: 1.55rem; font-weight: 700; color: var(--ink); letter-spacing: -0.01em; }}
       .indxx-sub {{ font-size: 0.9rem; color: var(--indxx-grey); font-weight: 500; margin-top: 3px;
                     text-transform: uppercase; letter-spacing: 0.14em; }}
-
+ 
       /* Section headers get a small red accent bar */
       h2, h3 {{
           border-left: 4px solid var(--indxx-red);
           padding-left: 12px !important;
           color: var(--ink);
       }}
-
+ 
       /* Primary button in brand red */
       .stButton > button {{
           background: var(--indxx-red); color: #fff; border: 0; font-weight: 600;
           border-radius: 6px;
       }}
       .stButton > button:hover {{ background: {INDXX_RED_DARK}; color: #fff; }}
-
+ 
       /* KPI cards */
       div[data-testid="stMetric"] {{
           background: #FAFAFA; border: 1px solid #ECECEC;
           border-radius: 10px; padding: 14px 16px;
       }}
       div[data-testid="stMetricValue"] {{ color: var(--ink); }}
-
+ 
       /* Footer */
       .indxx-footer {{
           margin-top: 34px; padding-top: 14px; border-top: 1px solid #ECECEC;
@@ -84,7 +94,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
+ 
 # ---- Header -----------------------------------------------------------------
 if _LOGO:
     st.markdown(
@@ -101,8 +111,8 @@ if _LOGO:
     )
 else:
     st.title("Indxx — ETF & Fund Filings")
-
-
+ 
+ 
 @st.cache_data(ttl=60)
 def load_filings():
     conn = sqlite3.connect(DB_PATH)
@@ -111,8 +121,8 @@ def load_filings():
     if not df.empty:
         df["filing_date"] = pd.to_datetime(df["filing_date"])
     return df
-
-
+ 
+ 
 @st.cache_data(ttl=60)
 def load_aum():
     conn = sqlite3.connect(DB_PATH)
@@ -124,59 +134,71 @@ def load_aum():
         df = pd.DataFrame()
     conn.close()
     return df
-
-
+ 
+ 
 col1, col2 = st.columns([3, 1])
 with col2:
     if st.button("Refresh data", type="primary"):
-        import pipeline
         today = datetime.date.today()
         week_ago = today - datetime.timedelta(days=7)
-        with st.spinner("Pulling the latest filings from EDGAR…"):
-            pipeline.run_all(week_ago.isoformat(), today.isoformat())
-        st.cache_data.clear()
-        st.rerun()
-
+        try:
+            import pipeline
+            with st.spinner("Pulling the latest filings from EDGAR…"):
+                pipeline.run_all(week_ago.isoformat(), today.isoformat())
+            st.cache_data.clear()
+            st.success("Data refreshed.")
+            st.rerun()
+        except Exception as e:
+            # Never let the button crash the whole dashboard. On the hosted app this
+            # typically means the SEC_EMAIL secret isn't set here (it lives on GitHub),
+            # or the environment can't run the full pipeline. Data still updates daily
+            # via the scheduled GitHub Action, so this button is really for local use.
+            st.warning(
+                "Couldn't refresh from here. The data updates automatically every morning "
+                "via the scheduled job — this button is mainly for running locally. "
+                f"(Details: {e})"
+            )
+ 
 filings_df = load_filings()
 aum_df = load_aum()
-
+ 
 if filings_df.empty:
     st.warning("No data yet — click Refresh data, or run `python pipeline.py` from the terminal first.")
     st.stop()
-
+ 
 # ---- Filters (filings) ----
 st.sidebar.header("Filters — Filings")
 min_date = filings_df["filing_date"].min().date()
 max_date = filings_df["filing_date"].max().date()
 date_range = st.sidebar.date_input("Filings date range", value=(min_date, max_date))
-
+ 
 fund_types = ["All"] + sorted(filings_df["fund_type"].dropna().unique().tolist())
 selected_fund_type = st.sidebar.selectbox("Fund type", fund_types)
-
+ 
 # Management style filter only meaningful (and only shown) when viewing ETFs
 selected_style = "All"
 if selected_fund_type == "ETF":
     styles = ["All"] + sorted(filings_df.loc[filings_df["fund_type"] == "ETF", "management_style"].dropna().unique().tolist())
     selected_style = st.sidebar.selectbox("Active / Passive", styles)
-
+ 
 buckets = ["All"] + sorted(filings_df["bucket"].dropna().unique().tolist())
 selected_bucket = st.sidebar.selectbox("Category", buckets)
-
+ 
 # Show only rows whose category label the classifier is confident about.
 high_conf_only = False
 if "bucket_confidence" in filings_df.columns:
     high_conf_only = st.sidebar.checkbox("High-confidence categories only", value=False,
                                          help="Hide filings whose category was a weak or ambiguous keyword match.")
-
+ 
 # Industry filter only meaningful (and only shown) when viewing the thematic category
 selected_industry = "All"
 if selected_bucket == "thematic":
     industries = ["All"] + sorted(filings_df.loc[filings_df["bucket"] == "thematic", "industry"].dropna().unique().tolist())
     selected_industry = st.sidebar.selectbox("Industry", industries)
-
+ 
 issuers = ["All"] + sorted(filings_df["filer_cik"].dropna().unique().tolist())
 selected_issuer = st.sidebar.selectbox("Issuer (CIK)", issuers)
-
+ 
 # Apply filters (filings)
 # `common` = everything EXCEPT the Category dropdown and the high-confidence toggle,
 # so the "Uncategorised (other)" section below can show the full 'other' pile
@@ -191,7 +213,7 @@ if selected_style != "All":
     common = common[common["management_style"] == selected_style]
 if selected_issuer != "All":
     common = common[common["filer_cik"] == selected_issuer]
-
+ 
 filtered = common.copy()
 if selected_bucket != "All":
     filtered = filtered[filtered["bucket"] == selected_bucket]
@@ -199,8 +221,8 @@ if selected_industry != "All":
     filtered = filtered[filtered["industry"] == selected_industry]
 if high_conf_only and "bucket_confidence" in filtered.columns:
     filtered = filtered[filtered["bucket_confidence"] == "high"]
-
-
+ 
+ 
 def add_recency(df):
     """Add live, per-row recency that updates on every daily refresh."""
     df = df.copy()
@@ -210,10 +232,10 @@ def add_recency(df):
         lambda d: "🆕 New today" if d <= 0 else ("This week" if d <= 7 else "")
     )
     return df
-
-
+ 
+ 
 filtered = add_recency(filtered)
-
+ 
 # ---- KPI strip (reflects the current filters) ----
 week_ago = pd.Timestamp(datetime.date.today() - datetime.timedelta(days=7))
 new_today = int((filtered["days_since_filed"] <= 0).sum())
@@ -222,29 +244,29 @@ k1.metric("Filings in view", f"{len(filtered):,}", delta=f"{new_today} new today
 k2.metric("ETFs", f"{int((filtered['fund_type'] == 'ETF').sum()):,}")
 k3.metric("Filed last 7 days", f"{int((filtered['filing_date'] >= week_ago).sum()):,}")
 k4.metric("Distinct issuers", f"{filtered['filer_cik'].nunique():,}")
-
+ 
 # ---- Chart 1: filings over time ----
 st.subheader("New filings over time")
 by_date = filtered.groupby(filtered["filing_date"].dt.date).size().reset_index(name="count")
 st.bar_chart(by_date.set_index("filing_date"), color=INDXX_RED)
-
+ 
 # ---- Chart 2: filings by category ----
 st.subheader("Filings by category")
 by_bucket = filtered.groupby("bucket").size().reset_index(name="count").sort_values("count", ascending=False)
 st.bar_chart(by_bucket.set_index("bucket"), color=INDXX_RED)
-
+ 
 # ---- Chart 2b: filings by industry (thematic only) ----
 if selected_bucket == "thematic" and not filtered.empty:
     st.subheader("Thematic filings by industry")
     by_industry = filtered.groupby("industry").size().reset_index(name="count").sort_values("count", ascending=False)
     st.bar_chart(by_industry.set_index("industry"), color=INDXX_RED)
-
+ 
 # ---- Chart 3: issuer leaderboard ----
 st.subheader("Issuer launch leaderboard")
-
+ 
 # Extract a clean issuer/trust name by stripping the "(CIK ...)" suffix from fund_name
 filtered["issuer_name"] = filtered["fund_name"].str.replace(r"\s*\(CIK\s*\d+\)", "", regex=True).str.strip()
-
+ 
 by_issuer = (
     filtered.groupby(["filer_cik", "issuer_name"])
     .size()
@@ -253,7 +275,7 @@ by_issuer = (
 )
 by_issuer = by_issuer[["issuer_name", "filings", "filer_cik"]]  # name first, CIK kept for reference
 st.dataframe(by_issuer.head(20), use_container_width=True)
-
+ 
 # ---- AUM flows (separate date range — N-PORT periods are quarterly, not recent) ----
 st.subheader("AUM flows")
 if aum_df.empty:
@@ -267,7 +289,7 @@ else:
         "AUM period range", value=(aum_min_date, aum_max_date),
         min_value=aum_min_date, max_value=aum_max_date,
     )
-
+ 
     aum_filtered = aum_df.copy()
     if len(aum_date_range) == 2:
         aum_start, aum_end = aum_date_range
@@ -276,13 +298,13 @@ else:
         ]
     if selected_bucket != "All" and "bucket" in aum_filtered.columns:
         aum_filtered = aum_filtered[aum_filtered["bucket"] == selected_bucket]
-
+ 
     if aum_filtered.empty:
         st.info("No AUM rows in the selected period range — try widening the AUM period range in the sidebar.")
     else:
         by_bucket_aum = aum_filtered.groupby("bucket")["net_flow"].sum().reset_index()
         st.bar_chart(by_bucket_aum.set_index("bucket"), color=INDXX_RED)
-
+ 
 # ---- Thematic fund descriptions ----
 if selected_bucket == "thematic" and not filtered.empty:
     st.subheader("Thematic fund descriptions")
@@ -291,7 +313,7 @@ if selected_bucket == "thematic" and not filtered.empty:
         st.info("No descriptions available for the current thematic filings (best-effort extraction; not all filings yield one).")
     else:
         st.dataframe(desc_view, use_container_width=True)
-
+ 
 # ---- Uncategorised ("other") listing — always visible ----
 # Shows the full 'other' pile for the current date/type/issuer window, regardless of
 # the Category dropdown. "other" = the fund name matched none of the category keywords,
@@ -310,7 +332,7 @@ else:
         other_view[other_cols].sort_values("filing_date", ascending=False),
         use_container_width=True,
     )
-
+ 
 # ---- Raw filings table ----
 st.subheader("Raw filings")
 display_cols = ["fund_name", "form_type", "filing_date", "days_since_filed", "status",
@@ -319,7 +341,7 @@ if "bucket_confidence" in filtered.columns:
     display_cols.append("bucket_confidence")
 display_cols.append("industry")
 st.dataframe(filtered[display_cols].sort_values("filing_date", ascending=False), use_container_width=True)
-
+ 
 # ---- Footer ----
 st.markdown(
     """

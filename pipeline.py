@@ -1,4 +1,3 @@
-
 import os
 import re
 import time
@@ -35,12 +34,10 @@ ETF_KEYWORDS = ["etf", "exchange traded", "exchange-traded"]
 ETF_BRANDS = ["ishares", "spdr", "invesco qqq", "proshares", "direxion", "global x",
               "ark ", "vaneck", "wisdomtree", "xtrackers", "franklin ftse"]
  
-# ---- Management style rules (only meaningful for ETFs) ----
+
 PASSIVE_KEYWORDS = ["index", "s&p", "nasdaq", "msci", "russell", "ftse", "passive", "tracking", "bloomberg"]
 ACTIVE_KEYWORDS = ["active", "actively managed"]
  
-# ---- Industry rules (only meaningful for thematic bucket) ----
-# label -> list of terms that map to it (first label with a match wins).
 INDUSTRY_RULES = {
     "Artificial Intelligence": ["ai", "artificial intelligence", "machine learning"],
     "Robotics & Automation": ["robotics", "automation"],
@@ -55,29 +52,19 @@ INDUSTRY_RULES = {
 DB_PATH = "etf_data.db"
  
 # ---- SEC request tuning ----
-SEC_MIN_INTERVAL = 0.15      # seconds between SEC requests (~6-7/sec, under the 10/sec limit)
-SEC_MAX_RETRIES = 4          # retries on 429 / 403 / 5xx / network errors
-EFTS_PAGE_SIZE = 100         # hits per full-text-search page
-EFTS_RESULT_CAP = 10000      # SEC caps full-text search at 10,000 total results per query
+SEC_MIN_INTERVAL = 0.15      
+SEC_MAX_RETRIES = 4          
+EFTS_PAGE_SIZE = 100         
+EFTS_RESULT_CAP = 10000      
  
-# ---- EDIT THIS with the real N-PORT zip URL from the SEC page for the quarter you want ----
-# https://www.sec.gov/dera/data/form-n-port-data-sets
 NPORT_ZIP_URL = "https://www.sec.gov/files/dera/data/form-n-port-data-sets/2026q1_nport.zip"
 NPORT_DIR = "nport_data"
  
-# ---- EDIT THESE if the column names differ after you inspect the actual TSVs ----
-# IMPORTANT: these are the SEC's documented field names, but casing/naming has
-# changed across dataset versions. get_aum_flows() prints the columns it actually
-# finds on first run — check that output against these and adjust if needed.
 COL_FUND_NAME = "SERIES_NAME"
 COL_TOTAL_ASSETS = "TOTAL_ASSETS"
 COL_ACCESSION = "ACCESSION_NUMBER"
 COL_PERIOD = "REPORT_ENDING_PERIOD"
  
-# Real monthly flow fields (N-PORT Item B.6). Net flow = sales + reinvestment - redemption.
-# This is the correct way to measure flows; differencing total assets (the old method)
-# blends flows with market moves. If these columns aren't present we fall back to the
-# old difference method and print a warning so the number is never silently wrong.
 FLOW_COLS = {
     "sales":        ["SALES_FLOW_MON1", "SALES_FLOW_MON2", "SALES_FLOW_MON3"],
     "reinvestment": ["REINVESTMENT_FLOW_MON1", "REINVESTMENT_FLOW_MON2", "REINVESTMENT_FLOW_MON3"],
@@ -85,9 +72,6 @@ FLOW_COLS = {
 }
  
  
-# ---------------------------------------------------------------------------
-# Networking helpers: throttle + retry so we stay friendly with SEC's servers.
-# ---------------------------------------------------------------------------
 _last_request_at = 0.0
  
  
@@ -165,7 +149,9 @@ def _iter_all_hits(form_type, start_date, end_date):
             break
         for hit in page:
             yield hit
-        from_ += EFTS_PAGE_SIZE
+        # Advance by how many we ACTUALLY got, not the requested size. EDGAR may return
+        # fewer per page than requested; using len(page) guarantees no records are skipped.
+        from_ += len(page)
         if from_ >= total or from_ >= EFTS_RESULT_CAP:
             break
  

@@ -116,9 +116,18 @@ if selected_bucket == "thematic" and not filtered.empty:
 
 # ---- Chart 3: issuer leaderboard ----
 st.subheader("Issuer launch leaderboard")
-by_issuer = filtered.groupby("filer_cik").size().reset_index(name="filings").sort_values("filings", ascending=False)
-st.dataframe(by_issuer.head(20), use_container_width=True)
 
+# Extract a clean issuer/trust name by stripping the "(CIK ...)" suffix from fund_name
+filtered["issuer_name"] = filtered["fund_name"].str.replace(r"\s*\(CIK\s*\d+\)", "", regex=True).str.strip()
+
+by_issuer = (
+    filtered.groupby(["filer_cik", "issuer_name"])
+    .size()
+    .reset_index(name="filings")
+    .sort_values("filings", ascending=False)
+)
+by_issuer = by_issuer[["issuer_name", "filings", "filer_cik"]]  # name first, CIK kept for reference
+st.dataframe(by_issuer.head(20), use_container_width=True)
 # ---- AUM flows (separate date range — N-PORT periods are quarterly, not recent) ----
 st.subheader("AUM flows")
 if aum_df.empty:

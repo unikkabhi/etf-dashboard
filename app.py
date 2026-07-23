@@ -1,18 +1,9 @@
-"""
-app.py — the Indxx ETF & Fund Filings dashboard. Runs locally on your ThinkPad.
-Start it with: streamlit run app.py
-Requires etf_data.db to already exist (run pipeline.py at least once first).
- 
-Keep these three files together in the same folder:
-    app.py, pipeline.py, indxx_logo.png
-(The logo file powers the branded header. If it's missing the app still runs,
-it just falls back to a text title.)
-"""
- 
 import os
 import base64
 import sqlite3
 import datetime
+import urllib.request
+import xml.etree.ElementTree as ET
  
 import pandas as pd
 import streamlit as st
@@ -43,6 +34,49 @@ st.set_page_config(
     page_icon=LOGO_PATH if _LOGO else "📈",
     layout="wide",
 )
+ 
+ 
+def fmt_usd(x):
+    """Human-readable US dollars: $1.23B, $345.0M, $12.3K, $500."""
+    try:
+        x = float(x)
+    except (TypeError, ValueError):
+        return "—"
+    if x != x:  # NaN
+        return "—"
+    sign = "-" if x < 0 else ""
+    a = abs(x)
+    if a >= 1e9:
+        return f"{sign}${a / 1e9:,.2f}B"
+    if a >= 1e6:
+        return f"{sign}${a / 1e6:,.2f}M"
+    if a >= 1e3:
+        return f"{sign}${a / 1e3:,.1f}K"
+    return f"{sign}${a:,.0f}"
+ 
+ 
+NEWS_FEED = "https://www.sec.gov/news/pressreleases.rss"
+ 
+ 
+@st.cache_data(ttl=1800)  # refresh news at most every 30 minutes
+def load_news(feed_url=NEWS_FEED, limit=8):
+    """Fetch latest SEC press releases. Returns a list of (title, link, date) or []."""
+    ua = os.environ.get("SEC_EMAIL", "ETF Filings Dashboard research@example.com")
+    req = urllib.request.Request(feed_url, headers={"User-Agent": ua})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        raw = resp.read()
+    root = ET.fromstring(raw)
+    items = []
+    for item in root.iter("item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+        pub = (item.findtext("pubDate") or "").strip()
+        if title and link:
+            items.append((title, link, pub))
+        if len(items) >= limit:
+            break
+    return items
+ 
  
 # ---- Brand styling ----------------------------------------------------------
 st.markdown(
@@ -112,6 +146,24 @@ if _LOGO:
 else:
     st.title("Indxx — ETF & Fund Filings")
  
+# ---- Market & filing news (live from the SEC, fails quietly if unavailable) ----
+with st.expander("📰 Latest from the SEC — press releases & rule-making", expanded=False):
+    try:
+        headlines = load_news()
+        if not headlines:
+            st.caption("No headlines available right now.")
+        else:
+            for title, link, pub in headlines:
+                date_str = pub.split(" 00:")[0] if pub else ""
+                st.markdown(
+                    f"[{title}]({link})  \n"
+                    f"<span style='color:#B4B3B3;font-size:0.8rem'>{pub}</span>",
+                    unsafe_allow_html=True,
+                )
+    except Exception:
+        st.caption("SEC news feed is unavailable right now — it loads live from sec.gov "
+                   "and depends on the host being able to reach it. The rest of the dashboard is unaffected.")
+ 
  
 @st.cache_data(ttl=60)
 def load_filings():
@@ -149,10 +201,7 @@ with col2:
             st.success("Data refreshed.")
             st.rerun()
         except Exception as e:
-            # Never let the button crash the whole dashboard. On the hosted app this
-            # typically means the SEC_EMAIL secret isn't set here (it lives on GitHub),
-            # or the environment can't run the full pipeline. Data still updates daily
-            # via the scheduled GitHub Action, so this button is really for local use.
+          
             st.warning(
                 "Couldn't refresh from here. The data updates automatically every morning "
                 "via the scheduled job — this button is mainly for running locally. "
@@ -184,7 +233,7 @@ if selected_fund_type == "ETF":
 buckets = ["All"] + sorted(filings_df["bucket"].dropna().unique().tolist())
 selected_bucket = st.sidebar.selectbox("Category", buckets)
  
-# Show only rows whose category label the classifier is confident about.
+
 high_conf_only = False
 if "bucket_confidence" in filings_df.columns:
     high_conf_only = st.sidebar.checkbox("High-confidence categories only", value=False,
@@ -199,10 +248,7 @@ if selected_bucket == "thematic":
 issuers = ["All"] + sorted(filings_df["filer_cik"].dropna().unique().tolist())
 selected_issuer = st.sidebar.selectbox("Issuer (CIK)", issuers)
  
-# Apply filters (filings)
-# `common` = everything EXCEPT the Category dropdown and the high-confidence toggle,
-# so the "Uncategorised (other)" section below can show the full 'other' pile
-# regardless of what Category is selected.
+
 common = filings_df.copy()
 if len(date_range) == 2:
     start, end = date_range
@@ -236,7 +282,7 @@ def add_recency(df):
  
 filtered = add_recency(filtered)
  
-# ---- KPI strip (reflects the current filters) ----
+# KPI strip 
 week_ago = pd.Timestamp(datetime.date.today() - datetime.timedelta(days=7))
 new_today = int((filtered["days_since_filed"] <= 0).sum())
 k1, k2, k3, k4 = st.columns(4)
@@ -245,26 +291,26 @@ k2.metric("ETFs", f"{int((filtered['fund_type'] == 'ETF').sum()):,}")
 k3.metric("Filed last 7 days", f"{int((filtered['filing_date'] >= week_ago).sum()):,}")
 k4.metric("Distinct issuers", f"{filtered['filer_cik'].nunique():,}")
  
-# ---- Chart 1: filings over time ----
+# filings over time ----
 st.subheader("New filings over time")
 by_date = filtered.groupby(filtered["filing_date"].dt.date).size().reset_index(name="count")
 st.bar_chart(by_date.set_index("filing_date"), color=INDXX_RED)
  
-# ---- Chart 2: filings by category ----
+# filings by category ----
 st.subheader("Filings by category")
 by_bucket = filtered.groupby("bucket").size().reset_index(name="count").sort_values("count", ascending=False)
 st.bar_chart(by_bucket.set_index("bucket"), color=INDXX_RED)
  
-# ---- Chart 2b: filings by industry (thematic only) ----
+# filings by industry (thematic only) ----
 if selected_bucket == "thematic" and not filtered.empty:
     st.subheader("Thematic filings by industry")
     by_industry = filtered.groupby("industry").size().reset_index(name="count").sort_values("count", ascending=False)
     st.bar_chart(by_industry.set_index("industry"), color=INDXX_RED)
  
-# ---- Chart 3: issuer leaderboard ----
+# issuer leaderboard ----
 st.subheader("Issuer launch leaderboard")
  
-# Extract a clean issuer/trust name by stripping the "(CIK ...)" suffix from fund_name
+# Extract a clean issuer/trust name 
 filtered["issuer_name"] = filtered["fund_name"].str.replace(r"\s*\(CIK\s*\d+\)", "", regex=True).str.strip()
  
 by_issuer = (
@@ -276,7 +322,7 @@ by_issuer = (
 by_issuer = by_issuer[["issuer_name", "filings", "filer_cik"]]  # name first, CIK kept for reference
 st.dataframe(by_issuer.head(20), use_container_width=True)
  
-# ---- AUM flows (separate date range — N-PORT periods are quarterly, not recent) ----
+# AUM flows 
 st.subheader("AUM flows")
 if aum_df.empty:
     st.info("No AUM data loaded yet — follow Day 3-4 in the Colab notebook to parse N-PORT data, "
@@ -303,9 +349,16 @@ else:
         st.info("No AUM rows in the selected period range — try widening the AUM period range in the sidebar.")
     else:
         by_bucket_aum = aum_filtered.groupby("bucket")["net_flow"].sum().reset_index()
+        st.metric("Total net flow (selected period)", fmt_usd(by_bucket_aum["net_flow"].sum()))
         st.bar_chart(by_bucket_aum.set_index("bucket"), color=INDXX_RED)
  
-# ---- Thematic fund descriptions ----
+        flow_table = by_bucket_aum.sort_values("net_flow", ascending=False).copy()
+        flow_table["Net flow"] = flow_table["net_flow"].apply(fmt_usd)
+        flow_table = flow_table[["bucket", "Net flow"]].rename(columns={"bucket": "Category"})
+        st.dataframe(flow_table, use_container_width=True, hide_index=True)
+        st.caption("Net flow = money in (sales + reinvestment) minus money out (redemptions), in US dollars.")
+ 
+# Thematic fund descriptions
 if selected_bucket == "thematic" and not filtered.empty:
     st.subheader("Thematic fund descriptions")
     desc_view = filtered[["fund_name", "industry", "description"]].dropna(subset=["description"])
@@ -314,10 +367,6 @@ if selected_bucket == "thematic" and not filtered.empty:
     else:
         st.dataframe(desc_view, use_container_width=True)
  
-# ---- Uncategorised ("other") listing — always visible ----
-# Shows the full 'other' pile for the current date/type/issuer window, regardless of
-# the Category dropdown. "other" = the fund name matched none of the category keywords,
-# so this is the list to review when deciding which new categories to add.
 st.subheader('Uncategorised filings ("other")')
 other_view = add_recency(common[common["bucket"] == "other"])
 if other_view.empty:
@@ -333,7 +382,7 @@ else:
         use_container_width=True,
     )
  
-# ---- Raw filings table ----
+
 st.subheader("Raw filings")
 display_cols = ["fund_name", "form_type", "filing_date", "days_since_filed", "status",
                 "filer_cik", "fund_type", "management_style", "bucket"]
@@ -353,3 +402,4 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+ 

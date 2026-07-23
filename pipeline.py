@@ -34,10 +34,12 @@ ETF_KEYWORDS = ["etf", "exchange traded", "exchange-traded"]
 ETF_BRANDS = ["ishares", "spdr", "invesco qqq", "proshares", "direxion", "global x",
               "ark ", "vaneck", "wisdomtree", "xtrackers", "franklin ftse"]
  
-
+# ---- Management style rules (only meaningful for ETFs) ----
 PASSIVE_KEYWORDS = ["index", "s&p", "nasdaq", "msci", "russell", "ftse", "passive", "tracking", "bloomberg"]
 ACTIVE_KEYWORDS = ["active", "actively managed"]
  
+# ---- Industry rules (only meaningful for thematic bucket) ----
+# label -> list of terms that map to it (first label with a match wins).
 INDUSTRY_RULES = {
     "Artificial Intelligence": ["ai", "artificial intelligence", "machine learning"],
     "Robotics & Automation": ["robotics", "automation"],
@@ -52,19 +54,29 @@ INDUSTRY_RULES = {
 DB_PATH = "etf_data.db"
  
 # ---- SEC request tuning ----
-SEC_MIN_INTERVAL = 0.15      
-SEC_MAX_RETRIES = 4          
-EFTS_PAGE_SIZE = 100         
-EFTS_RESULT_CAP = 10000      
+SEC_MIN_INTERVAL = 0.15      # seconds between SEC requests (~6-7/sec, under the 10/sec limit)
+SEC_MAX_RETRIES = 4          # retries on 429 / 403 / 5xx / network errors
+EFTS_PAGE_SIZE = 100         # hits per full-text-search page
+EFTS_RESULT_CAP = 10000      # SEC caps full-text search at 10,000 total results per query
  
+# ---- EDIT THIS with the real N-PORT zip URL from the SEC page for the quarter you want ----
+# https://www.sec.gov/dera/data/form-n-port-data-sets
 NPORT_ZIP_URL = "https://www.sec.gov/files/dera/data/form-n-port-data-sets/2026q1_nport.zip"
 NPORT_DIR = "nport_data"
  
+# ---- EDIT THESE if the column names differ after you inspect the actual TSVs ----
+# IMPORTANT: these are the SEC's documented field names, but casing/naming has
+# changed across dataset versions. get_aum_flows() prints the columns it actually
+# finds on first run — check that output against these and adjust if needed.
 COL_FUND_NAME = "SERIES_NAME"
 COL_TOTAL_ASSETS = "TOTAL_ASSETS"
 COL_ACCESSION = "ACCESSION_NUMBER"
 COL_PERIOD = "REPORT_ENDING_PERIOD"
  
+# Real monthly flow fields (N-PORT Item B.6). Net flow = sales + reinvestment - redemption.
+# This is the correct way to measure flows; differencing total assets (the old method)
+# blends flows with market moves. If these columns aren't present we fall back to the
+# old difference method and print a warning so the number is never silently wrong.
 FLOW_COLS = {
     "sales":        ["SALES_FLOW_MON1", "SALES_FLOW_MON2", "SALES_FLOW_MON3"],
     "reinvestment": ["REINVESTMENT_FLOW_MON1", "REINVESTMENT_FLOW_MON2", "REINVESTMENT_FLOW_MON3"],
@@ -72,6 +84,9 @@ FLOW_COLS = {
 }
  
  
+# ---------------------------------------------------------------------------
+# Networking helpers: throttle + retry so we stay friendly with SEC's servers.
+# ---------------------------------------------------------------------------
 _last_request_at = 0.0
  
  
@@ -116,10 +131,16 @@ def sec_get(url, params=None, stream=False, timeout=30):
 # EDGAR full-text search
 # ---------------------------------------------------------------------------
 def edgar_search(form_type, start_date, end_date, from_=0, size=EFTS_PAGE_SIZE):
-    """One page of EDGAR full-text search results for a form type + date range."""
+    """One page of EDGAR results for a form type + date range.
+ 
+    We filter ONLY by form type and date — NOT by a full-text keyword. Earlier the
+    query searched the document text for the literal form code (e.g. "485BPOS"),
+    which only matched the few filings that happen to contain that string and badly
+    undercounted. EDGAR accepts a filing-type-only search, so this returns every
+    filing of the form in the window.
+    """
     url = "https://efts.sec.gov/LATEST/search-index"  # note: /LATEST/ is case-sensitive
     params = {
-        "q": '"' + form_type + '"',
         "forms": form_type,
         "dateRange": "custom",
         "startdt": start_date,
@@ -467,3 +488,4 @@ if __name__ == "__main__":
     today = datetime.date.today()
     week_ago = today - datetime.timedelta(days=7)
     run_all(week_ago.isoformat(), today.isoformat())
+ 

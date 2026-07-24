@@ -162,6 +162,91 @@ st.markdown(
 )
 
 # ---- Header -----------------------------------------------------------------
+@st.cache_data(ttl=60)
+def load_korea():
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        df = pd.read_sql("SELECT * FROM filings_korea", conn)
+        if not df.empty:
+            df["filing_date"] = pd.to_datetime(df["filing_date"], errors="coerce")
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    return df
+
+
+def render_korea(kdf):
+    """South Korea (DART) view: new registrations + all fund filings, KO + best-effort EN."""
+    st.markdown('<div class="indxx-sub" style="margin:4px 0 10px 0;">South Korea · DART fund filings</div>',
+                unsafe_allow_html=True)
+    if kdf.empty:
+        st.warning("No Korea data yet — run the 'Update Korea (DART)' workflow, then reboot the app.")
+        return
+
+    upd = _db_last_updated()
+    if upd:
+        st.caption(f"🟢 Data file last updated: {upd.strftime('%d %b %Y, %H:%M')}")
+
+    # Sidebar filters (Korea)
+    st.sidebar.header("Filters — Korea")
+    kmin, kmax = kdf["filing_date"].min(), kdf["filing_date"].max()
+    krange = ()
+    if pd.notna(kmin) and pd.notna(kmax):
+        krange = st.sidebar.date_input("Filing date range", value=(kmin.date(), kmax.date()))
+    natures = ["All"] + sorted(kdf["filing_nature"].dropna().unique().tolist())
+    knature = st.sidebar.selectbox("Filing type", natures)
+    etf_only = st.sidebar.checkbox("ETF filings only", value=False)
+
+    kf = kdf.copy()
+    if len(krange) == 2:
+        s, e = krange
+        kf = kf[(kf["filing_date"].dt.date >= s) & (kf["filing_date"].dt.date <= e)]
+    if knature != "All":
+        kf = kf[kf["filing_nature"] == knature]
+    if etf_only:
+        kf = kf[kf["is_etf"] == 1]
+
+    kf = kf.copy()
+    kf["ETF"] = kf["is_etf"].map({1: "ETF", 0: ""}).fillna("")
+    kf["amended"] = kf["report_nm_ko"].fillna("").str.contains("정정")
+
+    # KPIs
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Filings in view", f"{len(kf):,}")
+    k2.metric("New registrations", f"{int((kf['filing_nature'] == 'New registration').sum()):,}")
+    k3.metric("ETF-tagged", f"{int((kf['is_etf'] == 1).sum()):,}")
+    k4.metric("Distinct filers", f"{kf['filer'].nunique():,}")
+
+    link_cfg = {"dart_url": st.column_config.LinkColumn("DART", display_text="Open filing")}
+
+    # New registrations (the launch signal)
+    st.subheader("🚀 New fund registrations")
+    reg = kf[kf["filing_nature"] == "New registration"]
+    if reg.empty:
+        st.info("No new registrations in the current filters.")
+    else:
+        st.caption(f"{len(reg):,} new fund registrations. \"amended\" = a correction to a prior "
+                   "registration, not a brand-new fund.")
+        reg_cols = ["filing_date", "report_nm_en", "report_nm_ko", "ETF", "amended", "filer", "dart_url"]
+        st.dataframe(reg[reg_cols].sort_values("filing_date", ascending=False),
+                     use_container_width=True, hide_index=True, column_config=link_cfg)
+
+    # All fund filings
+    st.subheader("All fund filings")
+    st.caption("Korean report name with best-effort English (unique fund names remain in Korean). "
+               "Every row links to the original filing on DART.")
+    all_cols = ["filing_date", "filing_nature", "report_nm_en", "report_nm_ko", "ETF", "filer", "dart_url"]
+    st.download_button(
+        "⬇️ Download current view (CSV)",
+        data=kf[all_cols].to_csv(index=False).encode("utf-8"),
+        file_name=f"korea_filings_{datetime.date.today().isoformat()}.csv",
+        mime="text/csv",
+    )
+    st.dataframe(kf[all_cols].sort_values("filing_date", ascending=False),
+                 use_container_width=True, hide_index=True, column_config=link_cfg)
+
+
+# ---- Header -----------------------------------------------------------------
 if _LOGO:
     st.markdown(
         f"""
@@ -177,6 +262,12 @@ if _LOGO:
     )
 else:
     st.title("Indxx — ETF & Fund Filings")
+
+# ---- Country selector -------------------------------------------------------
+country = st.selectbox("Country / market", ["United States", "South Korea"], index=0)
+if country == "South Korea":
+    render_korea(load_korea())
+    st.stop()   # everything below is the US dashboard; skip it for Korea
 
 # ---- Market & filing news (live from the SEC, fails quietly if unavailable) ----
 with st.expander("📰 Latest from the SEC — press releases & rule-making", expanded=False):
@@ -373,7 +464,7 @@ k4.metric("Distinct issuers", f"{filtered['filer_cik'].nunique():,}")
 
 # ---- Likely new fund launches (the signal an index desk actually wants) ----
 if "filing_nature" in common.columns:
-    st.subheader("Likely new fund launches")
+    st.subheader("🚀 Likely new fund launches")
     launches = add_recency(common[common["filing_nature"] == "New registration"])
     if launches.empty:
         st.info("No new registrations (N-1A / S-1) in this window — only amendments and routine filings.")

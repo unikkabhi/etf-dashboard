@@ -1,0 +1,31 @@
+name: Update Korea (DART)
+
+# Manual for now (click "Run workflow"). Once we've confirmed the classification
+# looks right, this gets merged into the daily job. Uses commit-before-pull so it
+# can't hit the "overwrite" error, and -X ours to keep its freshly-written data.
+on:
+  workflow_dispatch:
+
+jobs:
+  korea:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run Korea pipeline
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          PYTHONIOENCODING: "utf-8"
+        run: python pipeline_korea.py
+      - name: Commit and push updated database
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add etf_data.db
+          git commit -m "Automated Korea (DART) data update" || echo "No changes to commit"
+          git pull --rebase -X ours origin main || true
+          git push

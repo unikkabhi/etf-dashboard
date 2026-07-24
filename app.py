@@ -55,6 +55,29 @@ def fmt_usd(x):
     return f"{sign}${a:,.0f}"
  
  
+def edgar_url(cik, accession):
+    """Build a direct link to the filing's index page on EDGAR (for auditability).
+    Returns None if the accession isn't a real accession number."""
+    try:
+        accession = str(accession)
+        if accession.count("-") != 2 or not accession.replace("-", "").isdigit():
+            return None
+        cik0 = str(cik).split(",")[0].strip()
+        cik_int = int(cik0)
+        acc_nodash = accession.replace("-", "")
+        return f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nodash}/{accession}-index.htm"
+    except Exception:
+        return None
+ 
+ 
+def _db_last_updated():
+    """When the database file was last written — a proxy for 'data last refreshed'."""
+    try:
+        return datetime.datetime.fromtimestamp(os.path.getmtime(DB_PATH))
+    except Exception:
+        return None
+ 
+ 
 NEWS_FEED = "https://www.sec.gov/news/pressreleases.rss"
  
  
@@ -154,7 +177,6 @@ with st.expander("📰 Latest from the SEC — press releases & rule-making", ex
             st.caption("No headlines available right now.")
         else:
             for title, link, pub in headlines:
-                date_str = pub.split(" 00:")[0] if pub else ""
                 st.markdown(
                     f"[{title}]({link})  \n"
                     f"<span style='color:#B4B3B3;font-size:0.8rem'>{pub}</span>",
@@ -201,7 +223,6 @@ with col2:
             st.success("Data refreshed.")
             st.rerun()
         except Exception as e:
-          
             st.warning(
                 "Couldn't refresh from here. The data updates automatically every morning "
                 "via the scheduled job — this button is mainly for running locally. "
@@ -214,6 +235,27 @@ aum_df = load_aum()
 if filings_df.empty:
     st.warning("No data yet — click Refresh data, or run `python pipeline.py` from the terminal first.")
     st.stop()
+ 
+# ---- Data freshness & coverage status bar ----
+_updated = _db_last_updated()
+_cov_start = filings_df["filing_date"].min().date()
+_cov_end = filings_df["filing_date"].max().date()
+_forms = ", ".join(sorted(filings_df["form_type"].dropna().unique().tolist()))
+_fresh_col, _cov_col = st.columns([2, 3])
+with _fresh_col:
+    if _updated:
+        _age_h = (datetime.datetime.now() - _updated).total_seconds() / 3600
+        _stamp = _updated.strftime("%d %b %Y, %H:%M")
+        if _age_h > 36:
+            st.warning(f"⚠️ Data may be stale — last updated {_stamp} ({int(_age_h)}h ago). "
+                       "Check that the daily update job is succeeding.")
+        else:
+            st.caption(f"🟢 Data last updated: {_stamp}")
+    else:
+        st.caption("Data update time unavailable.")
+with _cov_col:
+    st.caption(f"**Coverage:** {_cov_start:%d %b %Y} → {_cov_end:%d %b %Y} · "
+               f"{len(filings_df):,} filings · forms: {_forms}")
  
 # ---- Filters (filings) ----
 st.sidebar.header("Filters — Filings")
@@ -233,7 +275,6 @@ if selected_fund_type == "ETF":
 buckets = ["All"] + sorted(filings_df["bucket"].dropna().unique().tolist())
 selected_bucket = st.sidebar.selectbox("Category", buckets)
  
-
 high_conf_only = False
 if "bucket_confidence" in filings_df.columns:
     high_conf_only = st.sidebar.checkbox("High-confidence categories only", value=False,
@@ -248,7 +289,6 @@ if selected_bucket == "thematic":
 issuers = ["All"] + sorted(filings_df["filer_cik"].dropna().unique().tolist())
 selected_issuer = st.sidebar.selectbox("Issuer (CIK)", issuers)
  
-
 common = filings_df.copy()
 if len(date_range) == 2:
     start, end = date_range
@@ -280,9 +320,19 @@ def add_recency(df):
     return df
  
  
+def with_edgar(df):
+    """Add an EDGAR source-link column so every row is one click from the real filing."""
+    df = df.copy()
+    if "accession_number" in df.columns:
+        df["EDGAR"] = df.apply(lambda r: edgar_url(r.get("filer_cik"), r.get("accession_number")), axis=1)
+    else:
+        df["EDGAR"] = None
+    return df
+ 
+ 
 filtered = add_recency(filtered)
  
-# KPI strip 
+# KPI strip
 week_ago = pd.Timestamp(datetime.date.today() - datetime.timedelta(days=7))
 new_today = int((filtered["days_since_filed"] <= 0).sum())
 k1, k2, k3, k4 = st.columns(4)
@@ -310,7 +360,7 @@ if selected_bucket == "thematic" and not filtered.empty:
 # issuer leaderboard ----
 st.subheader("Issuer launch leaderboard")
  
-# Extract a clean issuer/trust name 
+# Extract a clean issuer/trust name
 filtered["issuer_name"] = filtered["fund_name"].str.replace(r"\s*\(CIK\s*\d+\)", "", regex=True).str.strip()
  
 by_issuer = (
@@ -322,7 +372,7 @@ by_issuer = (
 by_issuer = by_issuer[["issuer_name", "filings", "filer_cik"]]  # name first, CIK kept for reference
 st.dataframe(by_issuer.head(20), use_container_width=True)
  
-# AUM flows 
+# AUM flows
 st.subheader("AUM flows")
 if aum_df.empty:
     st.info("No AUM data loaded yet — follow Day 3-4 in the Colab notebook to parse N-PORT data, "
@@ -376,20 +426,34 @@ else:
                "Review the names below to spot categories worth adding (e.g. REIT, commodity, "
                "multi-asset, target-date, municipal).")
     other_cols = ["fund_name", "form_type", "filing_date", "days_since_filed", "status",
-                  "filer_cik", "fund_type"]
+                  "filer_cik", "fund_type", "EDGAR"]
     st.dataframe(
-        other_view[other_cols].sort_values("filing_date", ascending=False),
+        with_edgar(other_view)[other_cols].sort_values("filing_date", ascending=False),
         use_container_width=True,
+        column_config={"EDGAR": st.column_config.LinkColumn("EDGAR", display_text="Open")},
     )
  
-
+# ---- Raw filings table + source links + CSV export ----
 st.subheader("Raw filings")
 display_cols = ["fund_name", "form_type", "filing_date", "days_since_filed", "status",
                 "filer_cik", "fund_type", "management_style", "bucket"]
 if "bucket_confidence" in filtered.columns:
     display_cols.append("bucket_confidence")
 display_cols.append("industry")
-st.dataframe(filtered[display_cols].sort_values("filing_date", ascending=False), use_container_width=True)
+ 
+st.download_button(
+    "⬇️ Download current view (CSV)",
+    data=filtered[display_cols].to_csv(index=False).encode("utf-8"),
+    file_name=f"indxx_filings_{datetime.date.today().isoformat()}.csv",
+    mime="text/csv",
+)
+ 
+raw_display = with_edgar(filtered)
+st.dataframe(
+    raw_display[display_cols + ["EDGAR"]].sort_values("filing_date", ascending=False),
+    use_container_width=True,
+    column_config={"EDGAR": st.column_config.LinkColumn("EDGAR", display_text="Open filing")},
+)
  
 # ---- Footer ----
 st.markdown(
@@ -397,9 +461,9 @@ st.markdown(
     <div class="indxx-footer">
       <b>Indxx</b> · Xcellence in Indexing &nbsp;—&nbsp;
       Fund type, category, style and industry labels are heuristic (keyword-based) and
-      intended as a research starting point, not a system of record.
+      intended as a research starting point, not a system of record. Every row links to the
+      original filing on EDGAR for verification.
     </div>
     """,
     unsafe_allow_html=True,
 )
- 

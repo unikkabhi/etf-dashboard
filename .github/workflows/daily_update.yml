@@ -21,7 +21,7 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git pull --rebase origin main
           git add etf_data.db
           git commit -m "Automated daily data update" || echo "No changes to commit"
+          git pull --rebase -X ours origin main || true
           git push

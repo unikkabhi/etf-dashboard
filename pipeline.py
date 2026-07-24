@@ -6,13 +6,18 @@ import sqlite3
 import requests
 import pandas as pd
  
-
+# ---- SEC requires a real contact email in the User-Agent, or it blocks requests. ----
+# In GitHub Actions this comes from the SEC_EMAIL secret (never committed to the repo).
+# For local runs, either `export SEC_EMAIL="Your Name you@example.com"` in your terminal
+# first, or just replace the fallback string below with your own name and email.
 SEC_EMAIL = os.environ.get("SEC_EMAIL", "YourName your-email@example.com")
 HEADERS = {"User-Agent": SEC_EMAIL}
  
 FORM_TYPES = ["S-1", "N-1A", "485BPOS"]
  
-
+# ---- Category (bucket) rules ----
+# Terms are matched on WORD BOUNDARIES (see _has_term), so "ai" no longer matches
+# inside "sustAInable" and "space" no longer matches inside "aeroSPACE".
 CATEGORY_RULES = {
     "digital": ["bitcoin", "ether", "ethereum", "digital asset", "blockchain", "crypto"],
     "fixed_income": ["treasury", "bond", "credit", "income", "duration", "municipal", "high yield"],
@@ -22,7 +27,9 @@ CATEGORY_RULES = {
     "equity": ["equity", "growth", "value", "large cap", "small cap", "mid cap", "dividend"],
 }
  
-
+# ---- Fund type rules (ETF vs Mutual Fund) ----
+# Name-based signals. Brand names are a heuristic assist for the many ETFs whose
+# series name omits "ETF" — verify against the filing for anything that matters.
 ETF_KEYWORDS = ["etf", "exchange traded", "exchange-traded"]
 ETF_BRANDS = ["ishares", "spdr", "invesco qqq", "proshares", "direxion", "global x",
               "ark ", "vaneck", "wisdomtree", "xtrackers", "franklin ftse"]
@@ -31,7 +38,8 @@ ETF_BRANDS = ["ishares", "spdr", "invesco qqq", "proshares", "direxion", "global
 PASSIVE_KEYWORDS = ["index", "s&p", "nasdaq", "msci", "russell", "ftse", "passive", "tracking", "bloomberg"]
 ACTIVE_KEYWORDS = ["active", "actively managed"]
  
-
+# ---- Industry rules (only meaningful for thematic bucket) ----
+# label -> list of terms that map to it (first label with a match wins).
 INDUSTRY_RULES = {
     "Artificial Intelligence": ["ai", "artificial intelligence", "machine learning"],
     "Robotics & Automation": ["robotics", "automation"],
@@ -46,22 +54,29 @@ INDUSTRY_RULES = {
 DB_PATH = "etf_data.db"
  
 # ---- SEC request tuning ----
-SEC_MIN_INTERVAL = 0.15      
-SEC_MAX_RETRIES = 4          
-EFTS_PAGE_SIZE = 100         
-EFTS_RESULT_CAP = 10000      
+SEC_MIN_INTERVAL = 0.15      # seconds between SEC requests (~6-7/sec, under the 10/sec limit)
+SEC_MAX_RETRIES = 4          # retries on 429 / 403 / 5xx / network errors
+EFTS_PAGE_SIZE = 100         # hits per full-text-search page
+EFTS_RESULT_CAP = 10000      # SEC caps full-text search at 10,000 total results per query
  
-
+# ---- EDIT THIS with the real N-PORT zip URL from the SEC page for the quarter you want ----
+# https://www.sec.gov/dera/data/form-n-port-data-sets
 NPORT_ZIP_URL = "https://www.sec.gov/files/dera/data/form-n-port-data-sets/2026q1_nport.zip"
 NPORT_DIR = "nport_data"
  
-
+# ---- EDIT THESE if the column names differ after you inspect the actual TSVs ----
+# IMPORTANT: these are the SEC's documented field names, but casing/naming has
+# changed across dataset versions. get_aum_flows() prints the columns it actually
+# finds on first run — check that output against these and adjust if needed.
 COL_FUND_NAME = "SERIES_NAME"
 COL_TOTAL_ASSETS = "TOTAL_ASSETS"
 COL_ACCESSION = "ACCESSION_NUMBER"
 COL_PERIOD = "REPORT_ENDING_PERIOD"
  
-
+# Real monthly flow fields (N-PORT Item B.6). Net flow = sales + reinvestment - redemption.
+# This is the correct way to measure flows; differencing total assets (the old method)
+# blends flows with market moves. If these columns aren't present we fall back to the
+# old difference method and print a warning so the number is never silently wrong.
 FLOW_COLS = {
     "sales":        ["SALES_FLOW_MON1", "SALES_FLOW_MON2", "SALES_FLOW_MON3"],
     "reinvestment": ["REINVESTMENT_FLOW_MON1", "REINVESTMENT_FLOW_MON2", "REINVESTMENT_FLOW_MON3"],
@@ -69,7 +84,9 @@ FLOW_COLS = {
 }
  
  
-
+# ---------------------------------------------------------------------------
+# Networking helpers: throttle + retry so we stay friendly with SEC's servers.
+# ---------------------------------------------------------------------------
 _last_request_at = 0.0
  
  
@@ -110,9 +127,9 @@ def sec_get(url, params=None, stream=False, timeout=30):
     return resp  # exhausted retries; hand back the last response for the caller to inspect
  
  
-
+# ---------------------------------------------------------------------------
 # EDGAR full-text search
-
+# ---------------------------------------------------------------------------
 def edgar_search(form_type, start_date, end_date, from_=0, size=EFTS_PAGE_SIZE):
     """One page of EDGAR results for a form type + date range.
  
@@ -122,7 +139,7 @@ def edgar_search(form_type, start_date, end_date, from_=0, size=EFTS_PAGE_SIZE):
     undercounted. EDGAR accepts a filing-type-only search, so this returns every
     filing of the form in the window.
     """
-    url = "https://efts.sec.gov/LATEST/search-index"  
+    url = "https://efts.sec.gov/LATEST/search-index"  # note: /LATEST/ is case-sensitive
     params = {
         "forms": form_type,
         "dateRange": "custom",
@@ -153,7 +170,8 @@ def _iter_all_hits(form_type, start_date, end_date):
             break
         for hit in page:
             yield hit
-        
+        # Advance by how many we ACTUALLY got, not the requested size. EDGAR may return
+        # fewer per page than requested; using len(page) guarantees no records are skipped.
         from_ += len(page)
         if from_ >= total or from_ >= EFTS_RESULT_CAP:
             break
@@ -228,6 +246,31 @@ def get_industry(fund_name):
     return "Other Thematic"
  
  
+def is_uit(fund_name):
+    """Unit Investment Trusts file 485BPOS in bulk (sequential 'Series' trusts).
+    They are routine paperwork, not new fund launches, so we flag them as noise."""
+    name = str(fund_name).lower()
+    return ("unit trust" in name) or ("unit investment trust" in name)
+ 
+ 
+def get_filing_nature(fund_name, form):
+    """
+    Classify what a filing actually SIGNALS, so an index desk can separate real
+    launches from routine paperwork:
+      - 'UIT series'        : Unit Investment Trust bulk paperwork (noise)
+      - 'New registration'  : N-1A or S-1 — a new fund being registered (high value)
+      - 'Routine amendment' : 485BPOS on a normal fund — usually an annual update
+      - 'Other'             : anything else
+    """
+    if is_uit(fund_name):
+        return "UIT series"
+    if form in ("N-1A", "S-1"):
+        return "New registration"
+    if form == "485BPOS":
+        return "Routine amendment"
+    return "Other"
+ 
+ 
 def get_filing_description(cik, filing_id):
     """
     Best-effort fetch of a short description from the actual filing document.
@@ -282,6 +325,7 @@ def get_new_filings(start_date, end_date):
                 management_style = get_management_style(fund_name, fund_type)
                 bucket = categorize(fund_name)
                 bucket_conf = bucket_confidence(fund_name)
+                filing_nature = get_filing_nature(fund_name, form)
                 industry = get_industry(fund_name) if bucket == "thematic" else None
                 description = None
                 if bucket == "thematic":
@@ -301,6 +345,7 @@ def get_new_filings(start_date, end_date):
                     "management_style": management_style,
                     "bucket": bucket,
                     "bucket_confidence": bucket_conf,
+                    "filing_nature": filing_nature,
                     "industry": industry,
                     "description": description,
                 })
@@ -408,7 +453,7 @@ def setup_db(conn):
     conn.execute("""CREATE TABLE IF NOT EXISTS filings
         (accession_number TEXT UNIQUE, fund_name TEXT, form_type TEXT, filing_date TEXT,
          filer_cik TEXT, fund_type TEXT, management_style TEXT, bucket TEXT,
-         bucket_confidence TEXT, industry TEXT, description TEXT)""")
+         bucket_confidence TEXT, filing_nature TEXT, industry TEXT, description TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS aum_flows
         (fund_name TEXT, total_net_assets REAL, period TEXT, net_flow REAL, bucket TEXT)""")
     conn.commit()
@@ -417,7 +462,8 @@ def setup_db(conn):
 def upsert_filings(conn, df):
     """Insert filings, skipping any accession numbers already stored. Returns count added."""
     cols = ["accession_number", "fund_name", "form_type", "filing_date", "filer_cik",
-            "fund_type", "management_style", "bucket", "bucket_confidence", "industry", "description"]
+            "fund_type", "management_style", "bucket", "bucket_confidence", "filing_nature",
+            "industry", "description"]
     records = [tuple(row.get(c) for c in cols) for row in df.to_dict("records")]
  
     before = conn.execute("SELECT COUNT(*) FROM filings").fetchone()[0]
@@ -439,7 +485,7 @@ def run_all(start_date, end_date):
     conn = sqlite3.connect(DB_PATH)
     setup_db(conn)
  
-    # ---- Filing (guarded so a fetch error can't take down the whole run) ----
+    # ---- Filings (guarded so a fetch error can't take down the whole run) ----
     try:
         filings_df = get_new_filings(start_date, end_date)
         if not filings_df.empty:
@@ -470,4 +516,3 @@ if __name__ == "__main__":
     today = datetime.date.today()
     week_ago = today - datetime.timedelta(days=7)
     run_all(week_ago.isoformat(), today.isoformat())
- 

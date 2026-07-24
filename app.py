@@ -220,7 +220,7 @@ def render_korea(kdf):
     link_cfg = {"dart_url": st.column_config.LinkColumn("DART", display_text="Open filing")}
 
     # New registrations (the launch signal)
-    st.subheader("🚀 New fund registrations")
+    st.subheader(" New fund registrations")
     reg = kf[kf["filing_nature"] == "New registration"]
     if reg.empty:
         st.info("No new registrations in the current filters.")
@@ -270,7 +270,7 @@ if country == "South Korea":
     st.stop()   # everything below is the US dashboard; skip it for Korea
 
 # ---- Market & filing news (live from the SEC, fails quietly if unavailable) ----
-with st.expander("📰 Latest from the SEC — press releases & rule-making", expanded=False):
+with st.expander("Latest from the SEC — press releases & rule-making", expanded=False):
     try:
         headlines = load_news()
         if not headlines:
@@ -464,7 +464,7 @@ k4.metric("Distinct issuers", f"{filtered['filer_cik'].nunique():,}")
 
 # ---- Likely new fund launches (the signal an index desk actually wants) ----
 if "filing_nature" in common.columns:
-    st.subheader("🚀 Likely new fund launches")
+    st.subheader("Likely new fund launches")
     launches = add_recency(common[common["filing_nature"] == "New registration"])
     if launches.empty:
         st.info("No new registrations (N-1A / S-1) in this window — only amendments and routine filings.")

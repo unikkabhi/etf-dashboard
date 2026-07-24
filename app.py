@@ -373,7 +373,7 @@ k4.metric("Distinct issuers", f"{filtered['filer_cik'].nunique():,}")
 
 # ---- Likely new fund launches (the signal an index desk actually wants) ----
 if "filing_nature" in common.columns:
-    st.subheader("🚀 Likely new fund launches")
+    st.subheader("Likely new fund launches")
     launches = add_recency(common[common["filing_nature"] == "New registration"])
     if launches.empty:
         st.info("No new registrations (N-1A / S-1) in this window — only amendments and routine filings.")

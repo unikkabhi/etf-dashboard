@@ -6,18 +6,13 @@ import sqlite3
 import requests
 import pandas as pd
  
-# ---- SEC requires a real contact email in the User-Agent, or it blocks requests. ----
-# In GitHub Actions this comes from the SEC_EMAIL secret (never committed to the repo).
-# For local runs, either `export SEC_EMAIL="Your Name you@example.com"` in your terminal
-# first, or just replace the fallback string below with your own name and email.
+
 SEC_EMAIL = os.environ.get("SEC_EMAIL", "YourName your-email@example.com")
 HEADERS = {"User-Agent": SEC_EMAIL}
  
 FORM_TYPES = ["S-1", "N-1A", "485BPOS"]
  
-# ---- Category (bucket) rules ----
-# Terms are matched on WORD BOUNDARIES (see _has_term), so "ai" no longer matches
-# inside "sustAInable" and "space" no longer matches inside "aeroSPACE".
+
 CATEGORY_RULES = {
     "digital": ["bitcoin", "ether", "ethereum", "digital asset", "blockchain", "crypto"],
     "fixed_income": ["treasury", "bond", "credit", "income", "duration", "municipal", "high yield"],
@@ -27,19 +22,14 @@ CATEGORY_RULES = {
     "equity": ["equity", "growth", "value", "large cap", "small cap", "mid cap", "dividend"],
 }
  
-# ---- Fund type rules (ETF vs Mutual Fund) ----
-# Name-based signals. Brand names are a heuristic assist for the many ETFs whose
-# series name omits "ETF" — verify against the filing for anything that matters.
 ETF_KEYWORDS = ["etf", "exchange traded", "exchange-traded"]
 ETF_BRANDS = ["ishares", "spdr", "invesco qqq", "proshares", "direxion", "global x",
               "ark ", "vaneck", "wisdomtree", "xtrackers", "franklin ftse"]
  
-# ---- Management style rules (only meaningful for ETFs) ----
+# Management style rules (only meaningful for ETFs)
 PASSIVE_KEYWORDS = ["index", "s&p", "nasdaq", "msci", "russell", "ftse", "passive", "tracking", "bloomberg"]
 ACTIVE_KEYWORDS = ["active", "actively managed"]
  
-# ---- Industry rules (only meaningful for thematic bucket) ----
-# label -> list of terms that map to it (first label with a match wins).
 INDUSTRY_RULES = {
     "Artificial Intelligence": ["ai", "artificial intelligence", "machine learning"],
     "Robotics & Automation": ["robotics", "automation"],
@@ -53,30 +43,22 @@ INDUSTRY_RULES = {
  
 DB_PATH = "etf_data.db"
  
-# ---- SEC request tuning ----
-SEC_MIN_INTERVAL = 0.15      # seconds between SEC requests (~6-7/sec, under the 10/sec limit)
-SEC_MAX_RETRIES = 4          # retries on 429 / 403 / 5xx / network errors
-EFTS_PAGE_SIZE = 100         # hits per full-text-search page
-EFTS_RESULT_CAP = 10000      # SEC caps full-text search at 10,000 total results per query
+# SEC request tuning 
+SEC_MIN_INTERVAL = 0.15      
+SEC_MAX_RETRIES = 4          
+EFTS_PAGE_SIZE = 100         
+EFTS_RESULT_CAP = 10000      
  
-# ---- EDIT THIS with the real N-PORT zip URL from the SEC page for the quarter you want ----
-# https://www.sec.gov/dera/data/form-n-port-data-sets
+
 NPORT_ZIP_URL = "https://www.sec.gov/files/dera/data/form-n-port-data-sets/2026q1_nport.zip"
 NPORT_DIR = "nport_data"
  
-# ---- EDIT THESE if the column names differ after you inspect the actual TSVs ----
-# IMPORTANT: these are the SEC's documented field names, but casing/naming has
-# changed across dataset versions. get_aum_flows() prints the columns it actually
-# finds on first run — check that output against these and adjust if needed.
+
 COL_FUND_NAME = "SERIES_NAME"
 COL_TOTAL_ASSETS = "TOTAL_ASSETS"
 COL_ACCESSION = "ACCESSION_NUMBER"
 COL_PERIOD = "REPORT_ENDING_PERIOD"
  
-# Real monthly flow fields (N-PORT Item B.6). Net flow = sales + reinvestment - redemption.
-# This is the correct way to measure flows; differencing total assets (the old method)
-# blends flows with market moves. If these columns aren't present we fall back to the
-# old difference method and print a warning so the number is never silently wrong.
 FLOW_COLS = {
     "sales":        ["SALES_FLOW_MON1", "SALES_FLOW_MON2", "SALES_FLOW_MON3"],
     "reinvestment": ["REINVESTMENT_FLOW_MON1", "REINVESTMENT_FLOW_MON2", "REINVESTMENT_FLOW_MON3"],
@@ -84,9 +66,6 @@ FLOW_COLS = {
 }
  
  
-# ---------------------------------------------------------------------------
-# Networking helpers: throttle + retry so we stay friendly with SEC's servers.
-# ---------------------------------------------------------------------------
 _last_request_at = 0.0
  
  
@@ -127,9 +106,6 @@ def sec_get(url, params=None, stream=False, timeout=30):
     return resp  # exhausted retries; hand back the last response for the caller to inspect
  
  
-# ---------------------------------------------------------------------------
-# EDGAR full-text search
-# ---------------------------------------------------------------------------
 def edgar_search(form_type, start_date, end_date, from_=0, size=EFTS_PAGE_SIZE):
     """One page of EDGAR results for a form type + date range.
  
@@ -170,8 +146,7 @@ def _iter_all_hits(form_type, start_date, end_date):
             break
         for hit in page:
             yield hit
-        # Advance by how many we ACTUALLY got, not the requested size. EDGAR may return
-        # fewer per page than requested; using len(page) guarantees no records are skipped.
+        
         from_ += len(page)
         if from_ >= total or from_ >= EFTS_RESULT_CAP:
             break
@@ -496,7 +471,7 @@ def run_all(start_date, end_date):
     except Exception as e:
         print(f"Filings fetch failed: {e}")
  
-    # ---- AUM flows (already guarded; quarterly, best-effort) ----
+    # AUM flows (already guarded; quarterly, best-effort)
     try:
         download_and_extract_nport()
         aum_df = get_aum_flows()

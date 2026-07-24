@@ -299,6 +299,16 @@ if selected_bucket == "thematic":
 issuers = ["All"] + sorted(filings_df["filer_cik"].dropna().unique().tolist())
 selected_issuer = st.sidebar.selectbox("Issuer (CIK)", issuers)
 
+# Signal filter: strip routine Unit-Investment-Trust paperwork, or show only new launches.
+nature_choice = "All filings"
+if "filing_nature" in filings_df.columns:
+    nature_choice = st.sidebar.selectbox(
+        "Filing signal",
+        ["All filings", "Exclude UIT noise", "New registrations only"],
+        help="UIT series are bulk trust paperwork, not fund launches. "
+             "New registrations (N-1A / S-1) are genuinely new funds.",
+    )
+
 common = filings_df.copy()
 if len(date_range) == 2:
     start, end = date_range
@@ -317,6 +327,11 @@ if selected_industry != "All":
     filtered = filtered[filtered["industry"] == selected_industry]
 if high_conf_only and "bucket_confidence" in filtered.columns:
     filtered = filtered[filtered["bucket_confidence"] == "high"]
+if "filing_nature" in filtered.columns:
+    if nature_choice == "Exclude UIT noise":
+        filtered = filtered[filtered["filing_nature"] != "UIT series"]
+    elif nature_choice == "New registrations only":
+        filtered = filtered[filtered["filing_nature"] == "New registration"]
 
 
 def add_recency(df):
@@ -345,11 +360,33 @@ filtered = add_recency(filtered)
 # KPI strip
 week_ago = pd.Timestamp(datetime.date.today() - datetime.timedelta(days=7))
 new_today = int((filtered["days_since_filed"] <= 0).sum())
+has_nature = "filing_nature" in filtered.columns
+n_launches = int((filtered["filing_nature"] == "New registration").sum()) if has_nature else 0
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Filings in view", f"{len(filtered):,}", delta=f"{new_today} new today" if new_today else None)
-k2.metric("ETFs", f"{int((filtered['fund_type'] == 'ETF').sum()):,}")
+if has_nature:
+    k2.metric("New registrations", f"{n_launches:,}", help="N-1A / S-1 — genuinely new funds (excludes UIT noise).")
+else:
+    k2.metric("ETFs", f"{int((filtered['fund_type'] == 'ETF').sum()):,}")
 k3.metric("Filed last 7 days", f"{int((filtered['filing_date'] >= week_ago).sum()):,}")
 k4.metric("Distinct issuers", f"{filtered['filer_cik'].nunique():,}")
+
+# ---- Likely new fund launches (the signal an index desk actually wants) ----
+if "filing_nature" in common.columns:
+    st.subheader("🚀 Likely new fund launches")
+    launches = add_recency(common[common["filing_nature"] == "New registration"])
+    if launches.empty:
+        st.info("No new registrations (N-1A / S-1) in this window — only amendments and routine filings.")
+    else:
+        st.caption(f"{len(launches):,} new registrations in view — new funds being registered, "
+                   "with the bulk Unit-Investment-Trust paperwork stripped out.")
+        launch_cols = ["fund_name", "form_type", "filing_date", "days_since_filed", "status",
+                       "filer_cik", "fund_type", "bucket", "EDGAR"]
+        st.dataframe(
+            with_edgar(launches)[launch_cols].sort_values("filing_date", ascending=False),
+            use_container_width=True,
+            column_config={"EDGAR": st.column_config.LinkColumn("EDGAR", display_text="Open filing")},
+        )
 
 # filings over time ----
 st.subheader("New filings over time")
@@ -449,6 +486,8 @@ display_cols = ["fund_name", "form_type", "filing_date", "days_since_filed", "st
                 "filer_cik", "fund_type", "management_style", "bucket"]
 if "bucket_confidence" in filtered.columns:
     display_cols.append("bucket_confidence")
+if "filing_nature" in filtered.columns:
+    display_cols.append("filing_nature")
 display_cols.append("industry")
 
 st.download_button(

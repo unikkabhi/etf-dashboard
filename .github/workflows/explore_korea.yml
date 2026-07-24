@@ -1,0 +1,22 @@
+name: Explore Korea (DART)
+
+# Manual only — click "Run workflow" in the Actions tab. It prints DART results
+# to the log and commits nothing. Safe to delete once we've seen the output.
+on:
+  workflow_dispatch:
+
+jobs:
+  explore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests
+      - name: Run DART exploration
+        env:
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          PYTHONIOENCODING: "utf-8"
+        run: python explore_korea.py
